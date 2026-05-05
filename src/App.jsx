@@ -10,7 +10,7 @@ Role: daily planning/prioritization, accountability on commitments (known patter
 
 function load() { try { return JSON.parse(localStorage.getItem(SK)) || {}; } catch { return {}; } }
 function save(s) { try { localStorage.setItem(SK, JSON.stringify(s)); } catch {} }
-function tod() { return new Date().toISOString().slice(0,10); }
+function tod() { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
 function fmtT(d) { return new Date(d).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}); }
 function fmtD(d) { return new Date(d).toLocaleDateString([],{weekday:"long",month:"short",day:"numeric"}); }
 function to12(t) { if(!t) return ""; const [h,m]=t.split(":").map(Number); return `${h%12||12}:${String(m).padStart(2,"0")} ${h>=12?"PM":"AM"}`; }
@@ -294,25 +294,30 @@ export default function App() {
     const goalCtx=(ns||dg)?`\nNorth star: ${ns||"not set"}\nToday's goal: ${dg||"not set"}`:"";
     const ASYS=`Manage tasks and events. Return ONLY valid JSON:\n{"taskActions":[{"type":"add","text":"...","priority":"high|medium|low","due":"YYYY-MM-DD or null"},{"type":"complete","id":N},{"type":"delete","id":N},{"type":"update_priority","id":N,"priority":"..."}],"eventActions":[{"type":"add","title":"...","date":"YYYY-MM-DD","startTime":"HH:MM or null","endTime":"HH:MM or null","location":"..."},{"type":"delete","id":N},{"type":"update","id":N,"title":"...","date":"...","startTime":"...","endTime":"...","location":"..."}]}\nIf none: {"taskActions":[],"eventActions":[]}\nToday: ${todayStr}${taskCtx}${allEvCtx}`;
     try {
-      const [mr,ar]=await Promise.all([
-        fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":import.meta.env.VITE_ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,system:SYS+goalCtx+taskCtx+evCtx,messages:newMsgs.map(m=>({role:m.role,content:m.content}))})}),
-        fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":import.meta.env.VITE_ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:600,system:ASYS,messages:[{role:"user",content:text}]})})
-      ]);
-      const [md,ad]=await Promise.all([mr.json(),ar.json()]);
+      // Step 1: detect and apply actions first
+      const ar=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":import.meta.env.VITE_ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:600,system:ASYS,messages:[{role:"user",content:text}]})});
+      const ad=await ar.json();
+      let actionSummary="";
       try {
         const {taskActions,eventActions}=JSON.parse(ad.content?.find(b=>b.type==="text")?.text||"{}");
+        const done=[];
         if(taskActions?.length) setTasks(p=>{let u=[...p]; taskActions.forEach(a=>{
-          if(a.type==="add") u.push({id:Date.now()+Math.random(),text:a.text,priority:a.priority||"medium",due:a.due||"",done:false,created:Date.now()});
-          else if(a.type==="complete") u=u.map(t=>t.id===a.id?{...t,done:true,completedOn:todayStr}:t);
-          else if(a.type==="delete") u=u.filter(t=>t.id!==a.id);
-          else if(a.type==="update_priority") u=u.map(t=>t.id===a.id?{...t,priority:a.priority}:t);
+          if(a.type==="add"){ u.push({id:Date.now()+Math.random(),text:a.text,priority:a.priority||"medium",due:a.due||"",done:false,created:Date.now()}); done.push(`added task "${a.text}"`); }
+          else if(a.type==="complete"){ const t=p.find(x=>x.id===a.id); u=u.map(x=>x.id===a.id?{...x,done:true,completedOn:todayStr}:x); if(t) done.push(`marked "${t.text}" as done`); }
+          else if(a.type==="delete"){ const t=p.find(x=>x.id===a.id); u=u.filter(x=>x.id!==a.id); if(t) done.push(`deleted task "${t.text}"`); }
+          else if(a.type==="update_priority"){ u=u.map(x=>x.id===a.id?{...x,priority:a.priority}:x); done.push(`updated priority`); }
         }); return u; });
         if(eventActions?.length) setEvents(p=>{let u=[...p]; eventActions.forEach(a=>{
-          if(a.type==="add") u.push({id:Date.now()+Math.random(),title:a.title,date:a.date||todayStr,startTime:a.startTime||"",endTime:a.endTime||"",location:a.location||""});
-          else if(a.type==="delete") u=u.filter(e=>e.id!==a.id);
-          else if(a.type==="update") u=u.map(e=>e.id===a.id?{...e,...Object.fromEntries(Object.entries(a).filter(([k])=>k!=="type"&&k!=="id"&&a[k]!=null))}:e);
+          if(a.type==="add"){ u.push({id:Date.now()+Math.random(),title:a.title,date:a.date||todayStr,startTime:a.startTime||"",endTime:a.endTime||"",location:a.location||""}); done.push(`added event "${a.title}"${a.date?` on ${a.date}`:""}`); }
+          else if(a.type==="delete"){ const ev=p.find(x=>x.id===a.id); u=u.filter(x=>x.id!==a.id); if(ev) done.push(`deleted event "${ev.title}"`); }
+          else if(a.type==="update"){ u=u.map(e=>e.id===a.id?{...e,...Object.fromEntries(Object.entries(a).filter(([k])=>k!=="type"&&k!=="id"&&a[k]!=null))}:e); done.push(`updated event`); }
         }); return u.sort((a,b)=>(a.startTime||"").localeCompare(b.startTime||"")); });
+        if(done.length) actionSummary=`\n\n[Actions taken: ${done.join(", ")}]`;
       } catch {}
+
+      // Step 2: get coach reply, now aware of what was done
+      const mr=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":import.meta.env.VITE_ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,system:SYS+goalCtx+taskCtx+evCtx+(actionSummary?`\n\nYou have just performed these actions automatically: ${actionSummary}. Acknowledge them naturally and briefly in your reply.`:""),messages:newMsgs.map(m=>({role:m.role,content:m.content}))})});
+      const md=await mr.json();
       const reply=md.content?.find(b=>b.type==="text")?.text||"Something went wrong.";
       setMsgs(p=>[...p,{role:"assistant",content:reply,time:Date.now()}]);
     } catch { setMsgs(p=>[...p,{role:"assistant",content:"Connection issue. Try again.",time:Date.now()}]); }
